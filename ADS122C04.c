@@ -38,50 +38,11 @@
 */
 
 #include "ADS122C04.h"
-
-#include "nrf_log.h"
-#include "nrf_delay.h"
+#include "transfer_handler.h"
 #include "math.h"
-
-//TWI
-#include "nrf_drv_twi.h"
-#include "nrf_pwr_mgmt.h"
 
 static uint8_t iic_sendbuf[20];
 static uint8_t iic_recvbuf[20];
-
-static volatile bool m_xfer_done = false;
-static const nrf_drv_twi_t m_twi = NRF_DRV_TWI_INSTANCE(0);
-
-void twi_handler(nrf_drv_twi_evt_t const *p_event, void *p_context)
-{
-	switch (p_event->type)
-	{
-		case NRF_DRV_TWI_EVT_DONE:
-			m_xfer_done = true;
-			break;
-		default:
-			break;
-	}
-}
-
-void twi_init(void)
-{
-	ret_code_t err_code;
-
-	const nrf_drv_twi_config_t twi_afe_config = {
-		.scl = 8,
-		.sda = 6,
-		.frequency = NRF_DRV_TWI_FREQ_100K,
-		.interrupt_priority = APP_IRQ_PRIORITY_HIGH,
-		.clear_bus_init = false
-	};
-
-	err_code = nrf_drv_twi_init(&m_twi, &twi_afe_config, twi_handler, NULL);
-	APP_ERROR_CHECK(err_code);
-
-	nrf_drv_twi_enable(&m_twi);
-}
 
 //Private Variables
 uint8_t _deviceAddress; //Keeps track of I2C address. setI2CAddress changes this.
@@ -110,37 +71,118 @@ bool ADS122C04_sendCommand(uint8_t command); // write to the selected command re
 bool ADS122C04_sendCommandWithValue(uint8_t command, uint8_t value); // write a value to the selected command register
 
 
+bool ADS122C04_writeReg(uint8_t reg, uint8_t writeValue)
+{
+    uint8_t command = 0;
+    command = ADS122C04_WRITE_CMD(reg);
+    return(ADS122C04_sendCommandWithValue(command, writeValue));
+}
+
+bool ADS122C04_readReg(uint8_t reg, uint8_t *readValue)
+{
+    
+    iic_sendbuf[0] = ADS122C04_READ_CMD(reg);
+
+    iic_send(_deviceAddress, iic_sendbuf, 1, true);
+    iic_read(_deviceAddress, iic_recvbuf, 1);
+    
+    *readValue = iic_recvbuf[0];
+        
+    return(true);
+}
+
+bool ADS122C04_sendCommand(uint8_t command)
+{
+    
+	iic_sendbuf[0] = command;
+
+	iic_send(_deviceAddress, iic_sendbuf, 1, true);
+	
+	return(true);
+}
+
+bool ADS122C04_sendCommandWithValue(uint8_t command, uint8_t value)
+{
+    
+	iic_sendbuf[0] = command;
+	iic_sendbuf[1] = value;
+
+	iic_send(_deviceAddress, iic_sendbuf, 2, true);
+	
+	return(true);
+}
+
+// Read the conversion result with count byte.
+// The conversion result is 24-bit two's complement (signed)
+// and is returned in the 24 lowest bits of the uint32_t conversionData.
+// Hence it will always appear positive.
+// Higher functions will need to take care of converting it to (e.g.) float or int32_t.
+bool ADS122C04_getConversionDataWithCount(uint32_t *conversionData, uint8_t *count)
+{
+    
+    iic_sendbuf[0] = ADS122C04_RDATA_CMD;
+
+    iic_send(_deviceAddress, iic_sendbuf, 1, true);
+    iic_read(_deviceAddress, iic_recvbuf, 4);
+
+    *count = iic_recvbuf[0];
+    *conversionData = ((uint32_t)iic_recvbuf[3]) | ((uint32_t)iic_recvbuf[2]<<8) | ((uint32_t)iic_recvbuf[1]<<16);
+
+    return(true);
+}
+
+// Read the conversion result.
+// The conversion result is 24-bit two's complement (signed)
+// and is returned in the 24 lowest bits of the uint32_t conversionData.
+// Hence it will always appear positive.
+// Higher functions will need to take care of converting it to (e.g.) float or int32_t.
+bool ADS122C04_getConversionData(uint32_t *conversionData)
+{
+    
+	iic_sendbuf[0] = ADS122C04_RDATA_CMD;
+
+	iic_send(_deviceAddress, iic_sendbuf, 1, true);
+	iic_read(_deviceAddress, iic_recvbuf, 3);
+    
+    *conversionData = ((uint32_t)iic_recvbuf[2]) | ((uint32_t)iic_recvbuf[1]<<8) | ((uint32_t)iic_recvbuf[0]<<16);
+    
+    return(true);
+}
+
+
 //Attempt communication with the device and initialise it
 //Return true if successful
 bool ads_begin(uint8_t deviceAddress)
 {
-  _deviceAddress = deviceAddress; //If provided, store the I2C address from user
+    iic_init();
+    
+    _deviceAddress = deviceAddress; //If provided, store the I2C address from user
 
-  nrf_delay_ms(1); // wait for power-on reset to complete (datasheet says we should do this)
+    delay(1); // wait for power-on reset to complete (datasheet says we should do this)
 
-  ads_reset(); // reset the ADS122C04 (datasheet says we should do this)
-	
-	ads_enablePGA(ADS122C04_PGA_DISABLED);
-	ads_setDataRate(ADS122C04_DATA_RATE_330SPS);
-	ads_setOperatingMode(ADS122C04_OP_MODE_TURBO);
-	ads_setConversionMode(ADS122C04_CONVERSION_MODE_CONTINUOUS);
-	ads_setVoltageReference(ADS122C04_VREF_INTERNAL);
-	ads_enableInternalTempSensor(ADS122C04_TEMP_SENSOR_OFF);
-	ads_setDataCounter(ADS122C04_DCNT_DISABLE);
-	ads_setDataIntegrityCheck(ADS122C04_CRC_DISABLED);
-	ads_setBurnOutCurrent(ADS122C04_BURN_OUT_CURRENT_OFF);
-	ads_setIDACcurrent(ADS122C04_IDAC_CURRENT_250_UA);
-	
-	ads_setInputMultiplexer(ADS122C04_MUX_AIN0_AIN1);
-	ads_setGain(ADS122C04_GAIN_1);
-	ads_setIDAC1mux(ADS122C04_IDAC1_AIN0);
-	ads_setIDAC2mux(ADS122C04_IDAC2_DISABLED);
-	
-	ads_printADS122C04config();
-	
-	ads_start();
+    ads_reset(); // reset the ADS122C04 (datasheet says we should do this)
 
-  return true; // Default to using 'safe' settings (disable the IDAC current sources)
+    ads_enablePGA(ADS122C04_PGA_ENABLED);
+    ads_setDataRate(ADS122C04_DATA_RATE_330SPS);
+    ads_setOperatingMode(ADS122C04_OP_MODE_NORMAL);
+    ads_setConversionMode(ADS122C04_CONVERSION_MODE_SINGLE_SHOT);
+    ads_setVoltageReference(ADS122C04_VREF_INTERNAL);
+    ads_enableInternalTempSensor(ADS122C04_TEMP_SENSOR_OFF);
+    ads_setDataCounter(ADS122C04_DCNT_DISABLE);
+    ads_setDataIntegrityCheck(ADS122C04_CRC_DISABLED);
+    ads_setBurnOutCurrent(ADS122C04_BURN_OUT_CURRENT_OFF);
+    ads_setIDACcurrent(ADS122C04_IDAC_CURRENT_250_UA);
+
+    ads_setInputMultiplexer(ADS122C04_MUX_AIN0_AIN1);
+    ads_setGain(ADS122C04_GAIN_2);
+    ads_setIDAC1mux(ADS122C04_IDAC1_AIN0);
+    ads_setIDAC2mux(ADS122C04_IDAC2_DISABLED);
+
+    ads_printADS122C04config();
+    
+    
+
+    return true; // Default to using 'safe' settings (disable the IDAC current sources)
 }
 
 float ads_readResistance(float gain) // Read the temperature in Centigrade
@@ -186,7 +228,7 @@ float ads_readRawVoltage(void)
   if ((raw_v.UINT32 & 0x00800000) == 0x00800000)
     raw_v.UINT32 |= 0xFF000000;
 	
-	voltageResult = ((float)raw_v.INT32) / 8388608.0f;
+	voltageResult = ((float)raw_v.INT32) / 8192000.0f;
 	
   return(voltageResult);
 }
@@ -470,110 +512,4 @@ bool ads_start(void)
 bool ads_powerdown(void)
 {
   return(ADS122C04_sendCommand(ADS122C04_POWERDOWN_CMD));
-}
-
-bool ADS122C04_writeReg(uint8_t reg, uint8_t writeValue)
-{
-  uint8_t command = 0;
-  command = ADS122C04_WRITE_CMD(reg);
-  return(ADS122C04_sendCommandWithValue(command, writeValue));
-}
-
-bool ADS122C04_readReg(uint8_t reg, uint8_t *readValue)
-{
-  ret_code_t err_code;
-	iic_sendbuf[0] = ADS122C04_READ_CMD(reg);
-
-	m_xfer_done = false;
-	err_code = nrf_drv_twi_tx(&m_twi, _deviceAddress, iic_sendbuf, 1, true);
-	APP_ERROR_CHECK(err_code);
-	while (m_xfer_done == false) nrf_pwr_mgmt_run();
-	
-	m_xfer_done = false;
-	err_code = nrf_drv_twi_rx(&m_twi, _deviceAddress, iic_recvbuf, 1);
-	APP_ERROR_CHECK(err_code);
-	while (m_xfer_done == false) nrf_pwr_mgmt_run();
-	
-	*readValue = iic_recvbuf[0];
-		
-  return(true);
-}
-
-bool ADS122C04_sendCommand(uint8_t command)
-{
-  ret_code_t err_code;
-	iic_sendbuf[0] = command;
-
-	m_xfer_done = false;
-	err_code = nrf_drv_twi_tx(&m_twi, _deviceAddress, iic_sendbuf, 1, true);
-	APP_ERROR_CHECK(err_code);
-	while (m_xfer_done == false) nrf_pwr_mgmt_run();
-	
-	return(true);
-}
-
-bool ADS122C04_sendCommandWithValue(uint8_t command, uint8_t value)
-{
-  ret_code_t err_code;
-	iic_sendbuf[0] = command;
-	iic_sendbuf[1] = value;
-
-	m_xfer_done = false;
-	err_code = nrf_drv_twi_tx(&m_twi, _deviceAddress, iic_sendbuf, 2, true);
-	APP_ERROR_CHECK(err_code);
-	while (m_xfer_done == false) nrf_pwr_mgmt_run();
-	
-	return(true);
-}
-
-// Read the conversion result with count byte.
-// The conversion result is 24-bit two's complement (signed)
-// and is returned in the 24 lowest bits of the uint32_t conversionData.
-// Hence it will always appear positive.
-// Higher functions will need to take care of converting it to (e.g.) float or int32_t.
-bool ADS122C04_getConversionDataWithCount(uint32_t *conversionData, uint8_t *count)
-{
-	ret_code_t err_code;
-	iic_sendbuf[0] = ADS122C04_RDATA_CMD;
-
-	m_xfer_done = false;
-	err_code = nrf_drv_twi_tx(&m_twi, _deviceAddress, iic_sendbuf, 1, true);
-	APP_ERROR_CHECK(err_code);
-	while (m_xfer_done == false) nrf_pwr_mgmt_run();
-	
-	m_xfer_done = false;
-	err_code = nrf_drv_twi_rx(&m_twi, _deviceAddress, iic_recvbuf, 4);
-	APP_ERROR_CHECK(err_code);
-	while (m_xfer_done == false) nrf_pwr_mgmt_run();
-
-  *count = iic_recvbuf[0];
-  *conversionData = ((uint32_t)iic_recvbuf[3]) | ((uint32_t)iic_recvbuf[2]<<8) | ((uint32_t)iic_recvbuf[1]<<16);
-	
-  return(true);
-}
-
-// Read the conversion result.
-// The conversion result is 24-bit two's complement (signed)
-// and is returned in the 24 lowest bits of the uint32_t conversionData.
-// Hence it will always appear positive.
-// Higher functions will need to take care of converting it to (e.g.) float or int32_t.
-bool ADS122C04_getConversionData(uint32_t *conversionData)
-{
-  ret_code_t err_code;
-	iic_sendbuf[0] = ADS122C04_RDATA_CMD;
-
-	m_xfer_done = false;
-	err_code = nrf_drv_twi_tx(&m_twi, _deviceAddress, iic_sendbuf, 1, true);
-	APP_ERROR_CHECK(err_code);
-	while (m_xfer_done == false) nrf_pwr_mgmt_run();
-	
-	m_xfer_done = false;
-	err_code = nrf_drv_twi_rx(&m_twi, _deviceAddress, iic_recvbuf, 3);
-	APP_ERROR_CHECK(err_code);
-	while (m_xfer_done == false) nrf_pwr_mgmt_run();
-	
-	//NRF_LOG_INFO("%x,%x,%x",iic_recvbuf[2],iic_recvbuf[1],iic_recvbuf[0])
-
-  *conversionData = ((uint32_t)iic_recvbuf[2]) | ((uint32_t)iic_recvbuf[1]<<8) | ((uint32_t)iic_recvbuf[0]<<16);
-  return(true);
 }
